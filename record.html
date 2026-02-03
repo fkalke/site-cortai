@@ -3,119 +3,255 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SaaS Recorder - Auth</title>
+    <title>Web Recorder - Estilo Meet</title>
     <style>
-        body { font-family: sans-serif; background: #121212; color: white; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-        .modal { background: #1e1e1e; padding: 30px; border-radius: 15px; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.5); width: 90%; max-width: 400px; }
-        .hidden { display: none; }
-        button { background: #007bff; color: white; border: none; padding: 15px 30px; border-radius: 8px; font-weight: bold; cursor: pointer; width: 100%; font-size: 16px; }
-        #status { margin-top: 20px; color: #aaa; font-size: 14px; }
-        video { width: 100%; border-radius: 10px; margin-top: 15px; background: #000; }
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; background-color: #f0f2f5; margin: 0; }
+        .container { background: white; padding: 2rem; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); text-align: center; }
+        video { width: 100%; max-width: 600px; border-radius: 8px; background: #000; margin-bottom: 1rem; }
+        .controls { display: flex; gap: 10px; justify-content: center; }
+        button { padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; transition: 0.3s; }
+        #startBtn { background-color: #0d6efd; color: white; }
+        #stopBtn { background-color: #dc3545; color: white; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        .status { margin-top: 1rem; font-size: 0.9rem; color: #555; }
+        .error { color: #dc3545; }
     </style>
 </head>
 <body>
 
-<div id="setup-screen" class="modal">
-    <h2>Configuração</h2>
-    <p>Para funcionar no Whiteboard, precisamos ativar o áudio e a tela.</p>
-    <button id="initBtn">ATIVAR SISTEMA</button>
-    <div id="status">Aguardando interação...</div>
-</div>
-
-<div id="recorder-screen" class="modal hidden">
-    <h3>Gravador Pronto</h3>
-    <video id="preview" autoplay muted playsinline></video>
-    <button id="startBtn" style="background: #28a745; margin-top: 15px;">INICIAR GRAVAÇÃO</button>
-    <button id="stopBtn" class="hidden" style="background: #dc3545; margin-top: 15px;">PARAR E SALVAR</button>
+<div class="container">
+    <h2>Gravador de Tela + Áudio Mixado</h2>
+    <video id="preview" autoplay muted></video>
+    <div class="controls">
+        <button id="startBtn">Iniciar Gravação</button>
+        <button id="stopBtn" disabled>Parar e Salvar</button>
+    </div>
+    <div id="status" class="status">Aguardando início...</div>
+    <div id="error" class="status error"></div>
 </div>
 
 <script>
-    const setupScreen = document.getElementById('setup-screen');
-    const recorderScreen = document.getElementById('recorder-screen');
-    const initBtn = document.getElementById('initBtn');
-    const startBtn = document.getElementById('startBtn');
-    const stopBtn = document.getElementById('stopBtn');
-    const statusDiv = document.getElementById('status');
-    const preview = document.getElementById('preview');
-
-    let finalStream;
-    let mediaRecorder;
-    let chunks = [];
-
-    // 1. O PRIMEIRO CLIQUE: Acorda as APIs de Mídia
-    initBtn.onclick = async () => {
-        statusDiv.innerText = "Solicitando microfone...";
-        try {
-            // Isso dispara o pop-up de permissão de áudio do Android
-            const micStream = await navigator.mediaDevices.getUserMedia({ 
-                audio: { echoCancellation: false, noiseSuppression: false } 
+// Polyfill para compatibilidade
+(function() {
+    if (!navigator.mediaDevices) {
+        navigator.mediaDevices = {};
+    }
+    
+    if (!navigator.mediaDevices.getUserMedia) {
+        navigator.mediaDevices.getUserMedia = function(constraints) {
+            const getUserMedia = navigator.webkitGetUserMedia || 
+                               navigator.mozGetUserMedia || 
+                               navigator.msGetUserMedia;
+            
+            if (!getUserMedia) {
+                return Promise.reject(new Error('Seu navegador não suporta acesso à câmera/microfone'));
+            }
+            
+            return new Promise(function(resolve, reject) {
+                getUserMedia.call(navigator, constraints, resolve, reject);
             });
-            
-            statusDiv.innerText = "Microfone OK! Aguardando Tela...";
-            
-            // Agora que o microfone foi aceito, liberamos a interface de gravação
-            setupScreen.classList.add('hidden');
-            recorderScreen.classList.remove('hidden');
-            
-            // Guardamos o stream do mic para usar depois
-            window.localMicStream = micStream;
+        };
+    }
+})();
 
-        } catch (err) {
-            alert("Erro de permissão: " + err.name + "\nCertifique-se de estar em HTTPS e de ter autorizado o Chrome no Android.");
-            statusDiv.innerText = "Erro: " + err.message;
+// Elementos da interface
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const preview = document.getElementById('preview');
+const statusDiv = document.getElementById('status');
+const errorDiv = document.getElementById('error');
+
+// Verificação inicial de compatibilidade
+async function checkCompatibility() {
+    try {
+        // Testa se as APIs estão disponíveis
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            throw new Error('API de mídia não suportada');
         }
-    };
-
-    // 2. O SEGUNDO CLIQUE: Inicia a captura de tela e gravação
-    startBtn.onclick = async () => {
-        try {
-            // Dispara o pop-up de captura de tela do Android
-            const screenStream = await navigator.mediaDevices.getDisplayMedia({ 
-                video: true,
-                audio: false // No Android 14, áudio interno via browser é instável, usamos o mic aberto
-            });
-
-            // Mixagem
-            const audioCtx = new AudioContext();
-            const dest = audioCtx.createMediaStreamDestination();
-            const source = audioCtx.createMediaStreamSource(window.localMicStream);
-            source.connect(dest);
-
-            finalStream = new MediaStream([
-                ...screenStream.getVideoTracks(),
-                ...dest.stream.getAudioTracks()
-            ]);
-
-            preview.srcObject = finalStream;
-            
-            mediaRecorder = new MediaRecorder(finalStream, { mimeType: 'video/webm;codecs=vp8' });
-            chunks = [];
-            
-            mediaRecorder.ondataavailable = e => chunks.push(e.data);
-            mediaRecorder.onstop = () => {
-                const blob = new Blob(chunks, { type: 'video/webm' });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = 'gravacao_whiteboard.webm';
-                a.click();
-            };
-
-            mediaRecorder.start();
-            startBtn.classList.add('hidden');
-            stopBtn.classList.remove('hidden');
-
-        } catch (err) {
-            alert("Erro na captura de tela: " + err.message);
+        
+        // Testa se getDisplayMedia está disponível
+        if (!navigator.mediaDevices.getDisplayMedia) {
+            throw new Error('Gravação de tela não suportada');
         }
-    };
+        
+        // Testa se MediaRecorder está disponível
+        if (!window.MediaRecorder) {
+            throw new Error('MediaRecorder não suportado');
+        }
+        
+        return true;
+    } catch (err) {
+        errorDiv.innerText = `Erro de compatibilidade: ${err.message}. Atualize para a versão mais recente do Chrome.`;
+        startBtn.disabled = true;
+        return false;
+    }
+}
 
-    stopBtn.onclick = () => {
+// Inicializa a verificação
+checkCompatibility();
+
+let mediaRecorder;
+let recordedChunks = [];
+let audioContext = null;
+
+startBtn.onclick = async () => {
+    try {
+        errorDiv.innerText = '';
+        statusDiv.innerText = "Solicitando permissões...";
+        
+        // 1. Captura a tela
+        statusDiv.innerText = "Selecione a tela/janela para compartilhar...";
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({
+            video: {
+                frameRate: { ideal: 30 },
+                width: { ideal: 1280 },
+                height: { ideal: 720 }
+            },
+            audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                sampleRate: 44100
+            }
+        }).catch(err => {
+            if (err.name === 'NotAllowedError') {
+                throw new Error('Permissão para gravar tela foi negada');
+            }
+            throw err;
+        });
+
+        // 2. Captura o microfone
+        statusDiv.innerText = "Solicitando acesso ao microfone...";
+        const micStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+                sampleRate: 44100
+            },
+            video: false
+        }).catch(err => {
+            if (err.name === 'NotAllowedError') {
+                throw new Error('Permissão para microfone foi negada. Verifique as configurações do navegador.');
+            }
+            throw err;
+        });
+
+        // 3. Mixagem de áudio
+        statusDiv.innerText = "Configurando mixagem de áudio...";
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const destination = audioContext.createMediaStreamDestination();
+
+        // Sistema (áudio da tela)
+        if (screenStream.getAudioTracks().length > 0) {
+            const systemSource = audioContext.createMediaStreamSource(screenStream);
+            systemSource.connect(destination);
+        } else {
+            console.warn("Áudio do sistema não compartilhado");
+        }
+
+        // Microfone
+        const micSource = audioContext.createMediaStreamSource(micStream);
+        micSource.connect(destination);
+
+        // 4. Stream combinado
+        const combinedStream = new MediaStream([
+            ...screenStream.getVideoTracks(),
+            ...destination.stream.getAudioTracks()
+        ]);
+
+        // Preview
+        preview.srcObject = combinedStream;
+
+        // 5. Configura MediaRecorder
+        const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') 
+            ? 'video/webm;codecs=vp9,opus'
+            : MediaRecorder.isTypeSupported('video/webm;codecs=vp8') 
+            ? 'video/webm;codecs=vp8,opus'
+            : 'video/webm';
+
+        mediaRecorder = new MediaRecorder(combinedStream, {
+            mimeType: mimeType,
+            videoBitsPerSecond: 2500000 // 2.5 Mbps
+        });
+
+        recordedChunks = [];
+
+        mediaRecorder.ondataavailable = (e) => {
+            if (e.data.size > 0) {
+                recordedChunks.push(e.data);
+            }
+        };
+
+        mediaRecorder.onstop = () => {
+            // Fecha o contexto de áudio
+            if (audioContext && audioContext.state !== 'closed') {
+                audioContext.close();
+            }
+
+            // Para todos os tracks
+            combinedStream.getTracks().forEach(track => track.stop());
+            screenStream.getTracks().forEach(track => track.stop());
+            micStream.getTracks().forEach(track => track.stop());
+
+            // Cria e faz download
+            const blob = new Blob(recordedChunks, { type: mimeType });
+            const url = URL.createObjectURL(blob);
+            
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `gravacao_${new Date().toISOString().replace(/[:.]/g, '-')}.webm`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+
+            statusDiv.innerText = "Gravação salva! Verifique seus downloads.";
+        };
+
+        mediaRecorder.onerror = (e) => {
+            console.error('Erro no MediaRecorder:', e);
+            errorDiv.innerText = 'Erro durante a gravação: ' + e.error.message;
+        };
+
+        // Inicia a gravação
+        mediaRecorder.start(1000); // Coleta dados a cada segundo
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        statusDiv.innerText = "● Gravando... (Tela + Mic + Sistema)";
+
+        // Se o usuário parar de compartilhar a tela, para a gravação
+        screenStream.getVideoTracks()[0].onended = () => {
+            if (mediaRecorder && mediaRecorder.state === 'recording') {
+                mediaRecorder.stop();
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+                statusDiv.innerText = "Gravação interrompida (usuário parou de compartilhar)";
+            }
+        };
+
+    } catch (err) {
+        console.error("Erro detalhado:", err);
+        errorDiv.innerText = "Erro: " + err.message;
+        statusDiv.innerText = "Falha na inicialização";
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        
+        // Fecha contexto de áudio se aberto
+        if (audioContext && audioContext.state !== 'closed') {
+            audioContext.close();
+        }
+    }
+};
+
+stopBtn.onclick = () => {
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
         mediaRecorder.stop();
-        finalStream.getTracks().forEach(t => t.stop());
-        window.localMicStream.getTracks().forEach(t => t.stop());
-        location.reload(); // Reseta para nova gravação
-    };
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        statusDiv.innerText = "Processando gravação...";
+    }
+};
 </script>
+
 </body>
 </html>
