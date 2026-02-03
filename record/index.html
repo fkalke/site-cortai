@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SaaS Recorder PWA</title>
+    <link rel="manifest" href="manifest.json">
+    <style>
+        body { font-family: sans-serif; background: #121212; color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+        .card { background: #1e1e1e; padding: 25px; border-radius: 15px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); text-align: center; width: 90%; max-width: 500px; }
+        video { width: 100%; border-radius: 10px; background: #000; margin: 15px 0; border: 1px solid #333; }
+        button { padding: 15px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; width: 100%; margin-bottom: 10px; font-size: 16px; }
+        #startBtn { background: #007bff; color: white; }
+        #stopBtn { background: #dc3545; color: white; display: none; }
+        .status { font-size: 13px; color: #888; margin-top: 10px; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h2>Gravador Whiteboard</h2>
+    <video id="preview" autoplay muted playsinline></video>
+
+    <button id="startBtn">ATIVAR E GRAVAR</button>
+    <button id="stopBtn">PARAR E SALVAR</button>
+
+    <div id="status" class="status">Verificando sistema...</div>
+</div>
+
+<script>
+    // Registro do Service Worker para PWA
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('sw.js');
+    }
+
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const preview = document.getElementById('preview');
+    const statusDiv = document.getElementById('status');
+
+    let mediaRecorder;
+    let chunks = [];
+
+    // Função para garantir acesso às APIs no Android
+    async function getMediaAPI() {
+        if (!navigator.mediaDevices && navigator.webkitGetUserMedia) {
+            return {
+                getUserMedia: (c) => new Promise((y, n) => navigator.webkitGetUserMedia(c, y, n)),
+                getDisplayMedia: (c) => navigator.mediaDevices.getDisplayMedia(c)
+            };
+        }
+        return navigator.mediaDevices;
+    }
+
+    startBtn.onclick = async () => {
+        const api = await getMediaAPI();
+
+        if (!api || !api.getUserMedia) {
+            alert("ERRO: O navegador bloqueou as APIs de mídia. Verifique se está em HTTPS ou instale como PWA.");
+            return;
+        }
+
+        try {
+            statusDiv.innerText = "Solicitando permissões de Áudio e Tela...";
+
+            // 1. Captura Microfone (Som ambiente do Whiteboard)
+            const micStream = await api.getUserMedia({
+                audio: { echoCancellation: false, noiseSuppression: false }
+            });
+
+            // 2. Captura Tela (Sem áudio interno para evitar erro no Android)
+            const screenStream = await api.getDisplayMedia({
+                video: { displaySurface: "monitor" },
+                audio: false
+            });
+
+            // 3. Mixagem
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const dest = audioCtx.createMediaStreamDestination();
+            const source = audioCtx.createMediaStreamSource(micStream);
+            source.connect(dest);
+
+            const finalStream = new MediaStream([
+                ...screenStream.getVideoTracks(),
+                ...dest.stream.getAudioTracks()
+            ]);
+
+            preview.srcObject = finalStream;
+
+            // 4. Iniciar Gravação
+            mediaRecorder = new MediaRecorder(finalStream, { mimeType: 'video/webm;codecs=vp8' });
+            chunks = [];
+            mediaRecorder.ondataavailable = e => chunks.push(e.data);
+            mediaRecorder.onstop = () => {
+                const blob = new Blob(chunks, { type: 'video/webm' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `whiteboard_rec_${Date.now()}.webm`;
+                a.click();
+                finalStream.getTracks().forEach(t => t.stop());
+            };
+
+            mediaRecorder.start();
+            startBtn.style.display = "none";
+            stopBtn.style.display = "block";
+            statusDiv.innerText = "GRAVANDO...";
+
+        } catch (err) {
+            alert("Erro: " + err.message);
+            statusDiv.innerText = "Falha no hardware.";
+        }
+    };
+
+    stopBtn.onclick = () => {
+        mediaRecorder.stop();
+        startBtn.style.display = "block";
+        stopBtn.style.display = "none";
+        statusDiv.innerText = "Salvo com sucesso!";
+    };
+</script>
+</body>
+</html>
